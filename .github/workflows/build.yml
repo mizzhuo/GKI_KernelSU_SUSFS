@@ -1089,6 +1089,49 @@ jobs:
 
           echo "=== NTSync 补丁与配置注入完成 ==="
 
+      - name: Droidspaces 全绿补全 + kABI 门禁
+        if: inputs.droidspaces != 'off'
+        working-directory: ${{ env.KERNEL_ROOT }}/common
+        run: |
+          set -e
+
+          echo "=== 1. 校验 SYSVIPC kABI 补丁是否真的生效 ==="
+          if grep -q 'ANDROID_KABI_USE(3, struct sysv_sem' include/linux/sched.h; then
+            echo "RESULT: SYSVIPC_KABI_OK"
+          else
+            echo "::error::SYSVIPC kABI 补丁未生效（槽位 345 不适配），继续会开机卡死"
+            exit 1
+          fi
+
+          echo "=== 2. cgroup + CFS kABI 补丁 ==="
+          wget -q https://raw.githubusercontent.com/Goldzxcbug/Droidspaces_Kernel_patch/main/cgroup_limits/fix_cgroup_limits_kabi_6.6.89.patch -O /tmp/cgroup_kabi.patch
+          echo "patch size: $(wc -c < /tmp/cgroup_kabi.patch)"
+          if patch -p1 --forward -F3 < /tmp/cgroup_kabi.patch; then
+            echo "RESULT: CGROUP_KABI_OK"
+          else
+            echo "--- 残留 .rej ---"
+            find . -name '*.rej' | head -20
+            echo "::error::cgroup kABI 补丁未完整应用"
+            exit 1
+          fi
+
+          echo "=== 3. 追加配置 ==="
+          enable_config() {
+            local cfg="$1"
+            if grep -q "^${cfg}=y" "$DEFCONFIG"; then echo "  已是 y: $cfg"
+            elif grep -q "^# ${cfg} is not set" "$DEFCONFIG"; then
+              sed -i "s/^# ${cfg} is not set$/${cfg}=y/" "$DEFCONFIG"; echo "  改为 y: $cfg"
+            else echo "${cfg}=y" >> "$DEFCONFIG"; echo "  追加: $cfg"; fi
+          }
+          for c in CONFIG_CGROUP_PIDS CONFIG_CFS_BANDWIDTH CONFIG_MACVLAN \
+                   CONFIG_IP6_NF_NAT CONFIG_IP6_NF_TARGET_MASQUERADE; do
+            enable_config "$c"
+          done
+
+          echo "=== 4. 自检 ==="
+          grep -E '^CONFIG_(CGROUP_PIDS|CFS_BANDWIDTH|MACVLAN|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE)=' "$DEFCONFIG"
+          echo "RESULT: FULL_GREEN_CONFIG_OK"
+
       - name: 应用 Unicode 绕过修复
         if: inputs.enable_susfs
         working-directory: ${{ env.KERNEL_ROOT }}/common
@@ -1594,6 +1637,29 @@ jobs:
               echo "退出码: $BUILD_STATUS"
             } >> "$LOG_FILE"
             exit "$BUILD_STATUS"
+
+      - name: 校验最终内核配置（防止静默丢弃）
+        if: inputs.droidspaces != 'off'
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          CFG=$(ls out/*/dist/.config 2>/dev/null | head -1)
+          [ -z "$CFG" ] && CFG=$(find out -name .config -type f 2>/dev/null | head -1)
+          echo "final .config = $CFG"
+          [ -f "$CFG" ] || { echo "::error::找不到最终 .config"; exit 1; }
+
+          MISSING=""
+          for s in CONFIG_CGROUP_PIDS CONFIG_CFS_BANDWIDTH CONFIG_MACVLAN \
+                   CONFIG_PID_NS CONFIG_IPC_NS CONFIG_USER_NS CONFIG_SYSVIPC \
+                   CONFIG_NTSYNC CONFIG_IP6_NF_NAT CONFIG_IP6_NF_TARGET_MASQUERADE; do
+            if grep -q "^${s}=y" "$CFG"; then echo "OK    $s"
+            else echo "MISS  $s"; MISSING="$MISSING $s"; fi
+          done
+
+          if [ -n "$MISSING" ]; then
+            echo "::error::最终配置缺少:$MISSING（可能被依赖检查静默丢弃）"
+            exit 1
+          fi
+          echo "RESULT: FINAL_CONFIG_ALL_GREEN"
 
       - name: 整理编译失败日志
         if: ${{ always() && steps.compile_kernel.outcome == 'failure' }}
