@@ -1130,6 +1130,20 @@ jobs:
 
           echo "=== 4. 自检 ==="
           grep -E '^CONFIG_(CGROUP_PIDS|CFS_BANDWIDTH|MACVLAN|IP6_NF_NAT|IP6_NF_TARGET_MASQUERADE)=' "$DEFCONFIG"
+
+          echo "=== 5. NTSync 权限延迟 2s → 9s（避开厂商 init 的 chmod 0600）==="
+          if [ -f drivers/misc/ntsync.c ]; then
+            if grep -q 'msecs_to_jiffies(2000)' drivers/misc/ntsync.c; then
+              sed -i 's/msecs_to_jiffies(2000)/msecs_to_jiffies(9000)/' drivers/misc/ntsync.c
+              echo "RESULT: NTSYNC_DELAY_9000"
+            else
+              echo "::warning::未找到 msecs_to_jiffies(2000)"
+              grep -n 'msecs_to_jiffies' drivers/misc/ntsync.c || true
+            fi
+          else
+            echo "::warning::drivers/misc/ntsync.c 不存在（NTSync 补丁没打上？）"
+          fi
+          
           echo "RESULT: FULL_GREEN_CONFIG_OK"
 
       - name: 应用 Unicode 绕过修复
